@@ -1,18 +1,27 @@
-# autoresearch
+# autoresearch (Kaggle P100 Edition)
 
-This is an experiment to have the LLM do its own research.
+This is an experiment to have the LLM do its own research, running on a **Kaggle P100 GPU** (15GB VRAM).
+
+## Hardware & Constraints
+
+- **GPU**: NVIDIA Tesla P100 (16GB VRAM, NO bf16 support, fp16 only, no Flash Attention 3)
+- **Attention**: PyTorch SDPA (no sliding window support)
+- **Dataset**: TinyStories (public, small)
+- **Model**: ~5M params (DEPTH=4, seq_len=256, vocab=2048)
+- **Repo**: `https://github.com/kuncevichandrew2/autoresearch.git`
+- **Kaggle user**: `andrewk444`
 
 ## Setup
 
-To set up a new experiment, work with the user to:
+To set up a new experiment:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar25`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
 2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
+4. **Data preparation**: Data is prepared on Kaggle at runtime. TinyStories is downloaded via HuggingFace `datasets` library and saved as parquet shards. The Kaggle kernel handles this automatically.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
 
@@ -20,15 +29,17 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+Each experiment runs on a **Kaggle P100 GPU** (15GB VRAM). The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). Experiments are launched remotely via Kaggle kernels using the Kaggle CLI (`kaggle kernels push`).
 
 **What you CAN do:**
 - Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+- Keep in mind P100 constraints: 16GB VRAM, no Flash Attention 3, SDPA only (no sliding window), NO bf16 (fp16 only), Pascal architecture (sm_60).
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
+- Use Flash Attention or any kernel that requires sm_75+ compute capability beyond what P100 supports.
 
 **The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
 
@@ -40,26 +51,22 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 ## Output format
 
-Once the script finishes it prints a summary like this:
+Once the script finishes it prints a summary like this (P100 example):
 
 ```
 ---
-val_bpb:          0.997900
+val_bpb:          0.686159
 training_seconds: 300.1
 total_seconds:    325.9
-peak_vram_mb:     45060.2
-mfu_percent:      39.80
-total_tokens_M:   499.6
-num_steps:        953
-num_params_M:     50.3
-depth:            8
+peak_vram_mb:     901.0
+mfu_percent:      ~1-2%
+total_tokens_M:   ~16
+num_steps:        ~1000
+num_params_M:     ~5.2
+depth:            4
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
-
-```
-grep "^val_bpb:" run.log
-```
+Note that the P100 is much slower than H100, so MFU% will be low (measured against H100 baseline). Peak VRAM should stay well under 15GB. Results are retrieved from Kaggle kernel output via `kaggle kernels output`.
 
 ## Logging results
 
@@ -95,20 +102,29 @@ LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+3. git commit and push to `origin` (your GitHub fork)
+4. Update the Kaggle kernel script to clone from your fork, then push the kernel: `kaggle kernels push -p kaggle-kernel/`
+5. Poll kernel status: `kaggle kernels status andrewk444/autoresearch-t4` (wait for completion)
+6. Pull results: `kaggle kernels output andrewk444/autoresearch-t4 -p /tmp/kaggle-output/`
+7. Read out the results from the kernel output log. Look for `val_bpb:` and `peak_vram_mb:`.
+8. If the output is empty or shows errors, the run crashed. Read the log to diagnose and attempt a fix.
+9. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
+10. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
+11. If val_bpb is equal or worse, you git reset back to where you started and force-push to revert the remote
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+**Timeout**: Each Kaggle kernel has a 12-hour limit, but training itself should take ~5 minutes (+ startup overhead for cloning, installing deps, downloading data). If a kernel exceeds 20 minutes total, cancel it and treat it as a failure (discard and revert).
 
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
+**Crashes**: If a run crashes (OOM on P100's 15GB, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken (e.g. OOM because the model is too large for P100), just skip it, log "crash" as the status in the tsv, and move on.
+
+**P100-specific considerations**:
+- P100 has 15GB VRAM — be conservative with model size increases
+- P100 has NO bf16 support — all code uses fp16 instead
+- No Flash Attention 3 — only PyTorch SDPA
+- torch.compile works but compilation takes longer on P100
+- Kaggle kernels have internet access, so the repo clone + data download happens each run
 
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+As an example use case, a user might leave you running while they sleep. Each Kaggle kernel experiment takes ~10-15 minutes (including startup overhead), so you can run approx 4-6 per hour, for a total of about 30-50 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
