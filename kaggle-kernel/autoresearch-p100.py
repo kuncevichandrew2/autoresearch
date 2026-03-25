@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Autoresearch on Kaggle P100 GPU.
-Clones the repo, prepares TinyStories data, and runs training.
+Autoresearch training kernel on Kaggle P100 GPU.
+Mounts pre-prepared dataset (autoresearch-data) — no download/tokenizer step needed.
 """
 
 import subprocess
 import os
-import sys
+import shutil
 
-def run(cmd, **kwargs):
+def run(cmd):
     print(f"\n{'='*60}")
     print(f">>> {cmd}")
     print('='*60)
-    result = subprocess.run(cmd, shell=True, **kwargs)
+    result = subprocess.run(cmd, shell=True)
     if result.returncode != 0:
         print(f"Command failed with exit code {result.returncode}")
     return result
@@ -20,63 +20,37 @@ def run(cmd, **kwargs):
 # Show GPU info
 run("nvidia-smi")
 
-# Install dependencies
-run("pip install uv")
+# Install PyTorch with CUDA 11.8 — required for P100 (sm_60, Pascal)
+# Kaggle's default PyTorch only supports sm_70+, so we override it
+run("pip install torch==2.4.1+cu118 --index-url https://download.pytorch.org/whl/cu118 -q")
 
-# Clone the repo
+# Install other dependencies (no torch — already installed above)
+run("pip install rustbpe tiktoken pyarrow requests matplotlib pandas numpy -q")
+
+# Clone the repo (experiment branch)
 os.chdir("/kaggle/working")
 if not os.path.exists("autoresearch"):
     run("git clone https://github.com/kuncevichandrew2/autoresearch.git")
 os.chdir("/kaggle/working/autoresearch")
 run("git checkout autoresearch/mar25")
 
-# Install project dependencies with uv
-run("uv pip install --system -r pyproject.toml")
+# Mount pre-prepared data from dataset (skips all download/tokenizer prep)
+DATA_SRC = "/kaggle/input/autoresearch-data"
+CACHE_DIR = os.path.expanduser("~/.cache/autoresearch")
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Download TinyStories and prepare data shards
-# The prepare.py expects parquet shards in ~/.cache/autoresearch/data/
-# TinyStories is available as parquet on HuggingFace
-print("\n" + "="*60)
-print("Preparing TinyStories data...")
-print("="*60)
+data_dst      = os.path.join(CACHE_DIR, "data")
+tokenizer_dst = os.path.join(CACHE_DIR, "tokenizer")
 
-run("pip install datasets")
+if not os.path.exists(data_dst):
+    print(f"\nLinking data: {DATA_SRC}/data -> {data_dst}")
+    os.symlink(os.path.join(DATA_SRC, "data"), data_dst)
 
-# Download and split TinyStories into train/val parquet shards
-import importlib
-prepare_script = """
-import os
-from datasets import load_dataset
+if not os.path.exists(tokenizer_dst):
+    print(f"\nCopying tokenizer: {DATA_SRC}/tokenizer -> {tokenizer_dst}")
+    shutil.copytree(os.path.join(DATA_SRC, "tokenizer"), tokenizer_dst)
 
-cache_dir = os.path.expanduser("~/.cache/autoresearch/data")
-os.makedirs(cache_dir, exist_ok=True)
-
-train_path = os.path.join(cache_dir, "shard_00000.parquet")
-# For val, we use the validation split as shard_00000 (since MAX_SHARD=0, VAL_SHARD=0)
-# But we need separate train and val. The lite version uses MAX_SHARD=0 and VAL_SHARD=6542
-# So val shard is shard_06542.parquet
-val_path = os.path.join(cache_dir, "shard_06542.parquet")
-
-if os.path.exists(train_path) and os.path.exists(val_path):
-    print("Data shards already exist, skipping download.")
-else:
-    print("Downloading TinyStories...")
-    ds = load_dataset("roneneldan/TinyStories")
-
-    # Save train split
-    print(f"Saving train shard to {train_path}...")
-    ds["train"].to_parquet(train_path)
-
-    # Save validation split
-    print(f"Saving val shard to {val_path}...")
-    ds["validation"].to_parquet(val_path)
-
-    print("Data preparation complete!")
-"""
-exec(prepare_script)
-
-# Train tokenizer
-run("python prepare.py --num-shards 0")
+print(f"\nCache ready at {CACHE_DIR}")
 
 # Run training
 print("\n" + "="*60)

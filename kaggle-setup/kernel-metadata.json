@@ -1,0 +1,13 @@
+{
+  "id": "andrewk444/autoresearch-setup",
+  "title": "Autoresearch Setup",
+  "code_file": "autoresearch-setup.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "competition_sources": [],
+  "dataset_sources": [],
+  "kernel_sources": []
+}
