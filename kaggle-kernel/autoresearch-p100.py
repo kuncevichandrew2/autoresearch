@@ -28,6 +28,7 @@ os.chdir("/kaggle/working")
 if not os.path.exists("autoresearch"):
     run("git clone https://github.com/kuncevichandrew2/autoresearch.git")
 os.chdir("/kaggle/working/autoresearch")
+run("git checkout autoresearch/mar25")
 
 # Install project dependencies with uv
 run("uv pip install --system -r pyproject.toml")
