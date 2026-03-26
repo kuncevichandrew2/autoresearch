@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader
 
 # GPU capability detection
 GPU_CAP = torch.cuda.get_device_capability()
@@ -385,10 +385,21 @@ print()
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
+def evaluate_loss(model, tokenizer, batch_size, num_batches=100):
+    """Evaluate cross-entropy loss (nats/token) on validation set."""
+    val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val")
+    total_loss = 0.0
+    with torch.no_grad():
+        for _ in range(num_batches):
+            x, y, _ = next(val_loader)
+            with autocast_ctx:
+                loss = model(x, y)
+            total_loss += loss.item()
+    return total_loss / num_batches
+
 # Final eval
 model.eval()
-with autocast_ctx:
-    val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
+val_loss = evaluate_loss(model, tokenizer, DEVICE_BATCH_SIZE)
 
 # Final summary
 t_end = time.time()
@@ -396,7 +407,7 @@ steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / 
 peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
 
 print("---")
-print(f"val_bpb:          {val_bpb:.6f}")
+print(f"val_loss:         {val_loss:.6f}")
 print(f"training_seconds: {total_training_time:.1f}")
 print(f"total_seconds:    {t_end - t_start:.1f}")
 print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
@@ -409,7 +420,7 @@ print(f"depth:            {DEPTH}")
 # WandB final summary
 if WANDB_ENABLED:
     wandb.summary.update({
-        "val_bpb": val_bpb,
+        "val_loss": val_loss,
         "training_seconds": total_training_time,
         "peak_vram_mb": peak_vram_mb,
         "mfu_percent": steady_state_mfu,

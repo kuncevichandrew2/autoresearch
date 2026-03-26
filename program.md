@@ -1,6 +1,6 @@
 # autoresearch
 
-Autonomous ML research: iterate on `train.py` to minimize `val_bpb`.
+Autonomous ML research: iterate on `train.py` to minimize `val_loss` (eval cross-entropy, nats/token).
 
 ## Setup
 
@@ -12,7 +12,7 @@ Autonomous ML research: iterate on `train.py` to minimize `val_bpb`.
 ## Rules
 
 - Only modify `train.py`. `prepare.py` is read-only. No new dependencies.
-- Goal: **lowest `val_bpb`**. Time budget is fixed at 5 min per experiment.
+- Goal: **lowest `val_loss`** (cross-entropy, nats/token). Time budget is fixed at 5 min per experiment.
 - Simpler is better at equal performance. Removing code for same result = win.
 - VRAM is a soft constraint — some increase is OK for meaningful gains.
 
@@ -22,10 +22,10 @@ Run forever until manually stopped. Never pause to ask the human.
 
 1. Edit `train.py` with an idea, `git commit`.
 2. `uv run train.py > run.log 2>&1`
-3. `grep "^val_bpb:\|^peak_vram_mb:" run.log`
+3. `grep "^val_loss:\|^peak_vram_mb:" run.log`
 4. If empty: crashed. `tail -n 50 run.log` to debug. Fix if trivial, else skip.
 5. Log to `results.tsv` (do not commit this file).
-6. If `val_bpb` improved → keep commit. If worse → `git reset` to previous best.
+6. If `val_loss` improved → keep commit. If worse → `git reset` to previous best.
 
 Kill runs exceeding 10 minutes. Treat as failure.
 
@@ -58,9 +58,9 @@ Concrete diff summary: what was modified in train.py (hyperparams, architecture,
 
 | Metric           | Value    |
 |------------------|----------|
-| val_bpb          | 0.9932   |
-| prev_best_bpb    | 0.9979   |
-| delta_bpb        | -0.0047  |
+| val_loss         | 2.1234   |
+| prev_best_loss   | 2.1891   |
+| delta_loss       | -0.0657  |
 | peak_vram_mb     | 45060.2  |
 | training_seconds | 300.1    |
 | mfu_percent      | 39.80    |
@@ -82,13 +82,13 @@ Any observations, surprises, or ideas for follow-up experiments.
 Tab-separated (not commas). Header + 5 columns:
 
 ```
-commit	val_bpb	memory_gb	status	description
-a1b2c3d	0.997900	44.0	keep	baseline
+commit	val_loss	memory_gb	status	description
+a1b2c3d	2.189100	44.0	keep	baseline
 b2c3d4e	0.000000	0.0	crash	double model width (OOM)
 ```
 
 - `commit`: short hash (7 chars)
-- `val_bpb`: metric (0.000000 for crashes)
+- `val_loss`: cross-entropy nats/token (0.000000 for crashes)
 - `memory_gb`: peak VRAM in GB (0.0 for crashes)
 - `status`: `keep`, `discard`, or `crash`
 - `description`: what this experiment tried
@@ -99,7 +99,7 @@ The script prints a `---` summary block at the end:
 
 ```
 ---
-val_bpb:          0.997900
+val_loss:         2.189100
 training_seconds: 300.1
 total_seconds:    325.9
 peak_vram_mb:     45060.2
@@ -110,4 +110,4 @@ num_params_M:     50.3
 depth:            8
 ```
 
-Extract metric: `grep "^val_bpb:" run.log`
+Extract metric: `grep "^val_loss:" run.log`
