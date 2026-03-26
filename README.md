@@ -1,91 +1,347 @@
 # autoresearch
 
-![teaser](progress.png)
+Autonomous ML research system. An AI agent iterates on `train.py` to minimize `val_bpb` (validation bits per byte) within a fixed 5-minute training budget. Based on [karpathy/autoresearch](https://github.com/karpathy/autoresearch).
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+This fork adds:
+- **WandB integration** for experiment tracking
+- **Adapter system** for running on different GPU platforms (Kaggle P100, etc.)
+- **Experiment reports** saved per-run to `reports/`
+- **Simplified train.py** — vanilla GPT + AdamW baseline, multi-GPU compatibility
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069) and [this tweet](https://x.com/karpathy/status/2031135152349524125).
+## Architecture Overview
 
-## How it works
+```mermaid
+graph TB
+    subgraph "Human"
+        H[Researcher] -->|writes instructions| PM[program.md]
+    end
 
-The repo is deliberately kept small and only really has three files that matter:
+    subgraph "AI Agent (Claude)"
+        PM -->|reads| AG[Agent]
+        AG -->|modifies| TR[train.py]
+        AG -->|runs| RUN["uv run train.py"]
+        AG -->|logs| RES[results.tsv]
+        AG -->|saves| RPT[reports/]
+        RUN -->|metrics| AG
+        RUN -->|wandb| WB[WandB Dashboard]
+    end
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+    subgraph "Fixed Infrastructure"
+        PR[prepare.py] -->|tokenizer| RUN
+        PR -->|data| RUN
+        PR -->|evaluate_bpb| RUN
+    end
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+    style TR fill:#ff9,stroke:#333
+    style PR fill:#9f9,stroke:#333
+    style PM fill:#9cf,stroke:#333
+```
 
-If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/status/2030720614752039185) looks pretty good for a lot more context.
+**Key principle:** exactly one mutable file — `train.py`. Everything else is fixed, ensuring fair experiment comparison.
 
-## Quick start
+## Experiment Cycle
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+```mermaid
+flowchart LR
+    A[Read train.py] --> B[Make a change]
+    B --> C[Git commit]
+    C --> D["Train 5 min"]
+    D --> E{val_bpb improved?}
+    E -->|Yes| F[keep commit]
+    E -->|No| G[git reset]
+    E -->|Crash| H[debug + reset]
+    F --> I[Save report]
+    G --> I
+    H --> I
+    I --> A
+```
+
+The agent runs in an infinite loop until manually stopped. Each experiment is logged in `results.tsv` and a report is saved to `reports/`.
+
+## Project Structure
+
+```
+autoresearch/
+├── train.py            # Model + optimizer + training loop (AGENT MODIFIES)
+├── prepare.py          # Data, tokenizer, evaluation (READ-ONLY)
+├── program.md          # Agent instructions (HUMAN EDITS)
+├── pyproject.toml      # Dependencies
+├── analysis.ipynb      # Result analysis
+├── reports/            # Per-experiment markdown reports
+├── adapters/
+│   └── kaggle/         # Kaggle GPU adapter
+│       ├── adapter.py
+│       ├── notebook.py
+│       ├── kernel-metadata.json
+│       ├── .env        # API keys (git-ignored)
+│       └── DESCRIPTION.md
+└── progress.png
+```
+
+| File | Purpose | Modified by |
+|------|---------|-------------|
+| `train.py` | GPT model + training | Agent |
+| `prepare.py` | Data + tokenizer + metric | Nobody |
+| `program.md` | Agent rules | Human |
+
+## Quick Start
+
+**Requirements:** Single NVIDIA GPU, Python 3.10+, [uv](https://docs.astral.sh/uv/).
 
 ```bash
-
-# 1. Install uv project manager (if you don't already have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install dependencies
+# Install dependencies
 uv sync
 
-# 3. Download data and train tokenizer (one-time, ~2 min)
+# Download data and train tokenizer (one-time, ~2 min)
 uv run prepare.py
 
-# 4. Manually run a single training experiment (~5 min)
+# Run a single training experiment (~5 min)
 uv run train.py
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+### Running the Agent
 
-## Running the agent
-
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
-
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
+```bash
+# Point Claude Code at the instructions
+claude -p program.md
 ```
 
-The `program.md` file is essentially a super lightweight "skill".
+The agent reads `program.md`, modifies `train.py`, trains, evaluates, and repeats.
 
-## Project structure
+## Model Architecture
+
+Vanilla GPT transformer with standard components:
+
+```mermaid
+graph TD
+    subgraph "GPT Model"
+        IN[Token IDs] --> EMB["Token Embedding (wte)"]
+        EMB --> NORM0[RMS Norm]
+
+        subgraph "Transformer Block x N"
+            NORM0 --> ATT[Causal Self-Attention + RoPE]
+            ATT --> RES1[Residual Add]
+            RES1 --> MLP1["MLP: Linear -> GELU -> Linear"]
+            MLP1 --> RES2[Residual Add]
+        end
+
+        RES2 --> NORM1[Final RMS Norm]
+        NORM1 --> HEAD[LM Head]
+        HEAD --> LOGITS[Logits]
+    end
+```
+
+**Components:**
+- **Embedding** — standard token embedding with RMS normalization
+- **Attention** — multi-head causal self-attention with RoPE (Rotary Position Embeddings)
+- **MLP** — standard 4x expansion with GELU activation
+- **Flash Attention 3** on SM80+ GPUs, falls back to PyTorch SDPA on older GPUs
+- **RMS Norm** — used throughout instead of LayerNorm
+
+### Default Hyperparameters
+
+```python
+DEPTH = 8               # transformer layers
+ASPECT_RATIO = 64       # model_dim = depth * 64
+HEAD_DIM = 128          # attention head dimension
+TOTAL_BATCH_SIZE = 2**19  # ~524K tokens per step
+LEARNING_RATE = 3e-4
+WEIGHT_DECAY = 0.1
+WARMUP_RATIO = 0.05     # 5% warmup
+WARMDOWN_RATIO = 0.5    # 50% cosine decay
+DEVICE_BATCH_SIZE = 128
+```
+
+## Data Pipeline
+
+```mermaid
+flowchart TD
+    HF["HuggingFace Hub (climbmix-400b)"] -->|download| SH[Parquet shards]
+    SH -->|rustbpe| TOK["BPE Tokenizer (vocab_size=8192)"]
+    TOK --> CACHE["~/.cache/autoresearch/"]
+    SH --> CACHE
+
+    subgraph "Runtime: make_dataloader"
+        CACHE -->|read shards| DOCS[Documents]
+        DOCS -->|tokenize| TOKENS[Token sequences]
+        TOKENS -->|best-fit packing| BATCH["Batches [B, T]"]
+    end
+```
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_SEQ_LEN` | 2048 | Context length |
+| `TIME_BUDGET` | 300s | Training time (5 min) |
+| `EVAL_TOKENS` | ~21M | Validation tokens |
+| `VOCAB_SIZE` | 8192 | BPE vocabulary size |
+
+### Metric: Bits Per Byte (BPB)
 
 ```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+BPB = total_nats / (ln(2) * total_bytes)
 ```
 
-## Design choices
+BPB is vocab-size-independent, allowing fair comparison across different tokenizer configurations.
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+## Training Loop
 
-## Platform support
+```mermaid
+sequenceDiagram
+    participant DL as DataLoader
+    participant M as Model
+    participant O as AdamW Optimizer
+    participant E as Evaluator
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+    loop Every step (up to 5 minutes)
+        loop Gradient Accumulation
+            DL->>M: batch [B, T]
+            M->>M: forward (autocast)
+            M->>M: backward
+        end
 
-Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
+        O->>M: optimizer.step()
 
-1. To get half-decent results I'd use a dataset with a lot less entropy, e.g. this [TinyStories dataset](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean). These are GPT-4 generated short stories. Because the data is a lot narrower in scope, you will see reasonable results with a lot smaller models (if you try to sample from them after training).
-2. You might experiment with decreasing `vocab_size`, e.g. from 8192 down to 4096, 2048, 1024, or even - simply byte-level tokenizer with 256 possibly bytes after utf-8 encoding.
-3. In `prepare.py`, you'll want to lower `MAX_SEQ_LEN` a lot, depending on the computer even down to 256 etc. As you lower `MAX_SEQ_LEN`, you may want to experiment with increasing `DEVICE_BATCH_SIZE` in `train.py` slightly to compensate. The number of tokens per fwd/bwd pass is the product of these two.
-4. Also in `prepare.py`, you'll want to decrease `EVAL_TOKENS` so that your validation loss is evaluated on a lot less data.
-5. In `train.py`, the primary single knob that controls model complexity is the `DEPTH` (default 8, here). A lot of variables are just functions of this, so e.g. lower it down to e.g. 4.
-6. You'll want to most likely use `WINDOW_PATTERN` of just "L", because "SSSL" uses alternating banded attention pattern that may be very inefficient for you. Try it.
-7. You'll want to lower `TOTAL_BATCH_SIZE` a lot, but keep it powers of 2, e.g. down to `2**14` (~16K) or so even, hard to tell.
+        alt loss is NaN or > 100
+            M-->>M: exit(1) — fast fail
+        end
+    end
 
-I think these would be the reasonable hyperparameters to play with. Ask your favorite coding agent for help and copy paste them this guide, as well as the full source code.
+    M->>E: eval mode
+    E->>E: evaluate_bpb on validation
+    E-->>M: val_bpb metric
+```
 
-## Notable forks
+- **Time-based LR schedule** — warmup -> constant -> cosine decay, tied to wall-clock progress
+- **GradScaler** — enabled automatically for fp16 (older GPUs), no-op for bf16
+- **Gradient clipping** — max_norm=1.0
+- **torch.compile** — enabled on SM70+ GPUs, skipped on older hardware
+- **Fast-fail** — training aborts on NaN or loss > 100
 
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
-- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD)
+## GPU Compatibility
+
+| GPU | Capability | Precision | torch.compile | Flash Attn | Notes |
+|-----|-----------|-----------|--------------|------------|-------|
+| H100 | SM90 | bf16 | Yes | FA3 | Reference platform |
+| A100 | SM80 | bf16 | Yes | FA3 | |
+| V100 | SM70 | fp16 + GradScaler | Yes | SDPA fallback | |
+| T4 | SM75 | fp16 + GradScaler | Yes | SDPA fallback | |
+| P100 | SM60 | fp16 + GradScaler | No | SDPA fallback | Requires torch 2.4.1+cu118 |
+
+Automatic detection: the script reads `torch.cuda.get_device_capability()` and adjusts precision, attention backend, and compilation accordingly.
+
+## WandB Integration
+
+Training metrics are logged to [Weights & Biases](https://wandb.ai/) when `WANDB_API_KEY` is set:
+
+- **Per-step** (every 10 steps): `train/loss`, `train/lr_multiplier`, `train/tokens_per_sec`, `train/mfu_percent`, `train/progress`
+- **Final summary**: `val_bpb`, `training_seconds`, `peak_vram_mb`, `mfu_percent`, `total_tokens_M`, `num_steps`, `num_params_M`
+
+Graceful fallback: if `wandb` is not installed or `WANDB_API_KEY` is not set, logging is silently skipped.
+
+```bash
+export WANDB_API_KEY=your_key
+export WANDB_PROJECT=autoresearch  # optional, defaults to "autoresearch"
+```
+
+## Adapters
+
+Adapters allow running autoresearch on different GPU platforms.
+
+### Kaggle P100
+
+The `adapters/kaggle/` directory contains everything needed to run on Kaggle's free P100 GPUs:
+
+1. Copy `.env.example` to `.env` and fill in your API keys
+2. Push the notebook to Kaggle:
+   ```bash
+   cd adapters/kaggle
+   kaggle kernels push
+   ```
+3. The notebook installs `torch==2.4.1+cu118` (P100 compatibility), embeds `prepare.py` and `train.py` via base64, and runs the full training pipeline.
+
+P100-specific tuning in the notebook: `DEPTH=6`, `DEVICE_BATCH_SIZE=16` to fit 16GB VRAM.
+
+## Output Format
+
+### Training log (overwritten via `\r`)
+
+```
+step 00150 (42.3%) | loss: 4.123456 | lrm: 1.00 | dt: 312ms | tok/sec: 1,680,000 | mfu: 45.2% | epoch: 1 | remaining: 173s
+```
+
+### Final summary (after training completes)
+
+```
+---
+val_bpb:          1.187432
+training_seconds: 300.1
+total_seconds:    342.5
+peak_vram_mb:     14230.8
+mfu_percent:      44.50
+total_tokens_M:   95.4
+num_steps:        182
+num_params_M:     46.2
+depth:            8
+```
+
+The agent parses the `---` summary block to extract `val_bpb` and decide whether to keep or discard the commit.
+
+### Experiment Reports
+
+Each experiment generates a report in `reports/{N}_{timestamp}.md` with:
+- Hypothesis and changes
+- Metrics table (val_bpb, delta, VRAM, MFU, etc.)
+- Result verdict and notes
+
+### results.tsv
+
+```
+commit	val_bpb	memory_gb	status	description
+a1b2c3d	0.997900	44.0	keep	baseline
+b2c3d4e	0.993200	44.2	keep	increase LR to 0.04
+c3d4e5f	0.000000	0.0	crash	double model width (OOM)
+```
+
+## Full Data Flow
+
+```mermaid
+flowchart TD
+    subgraph "Preparation (one-time)"
+        HF["HuggingFace (climbmix-400b)"] -->|download| SHARDS[Parquet shards]
+        SHARDS -->|train_tokenizer| BPE["BPE Tokenizer (8192 tokens)"]
+        BPE --> CACHE["~/.cache/autoresearch/"]
+        SHARDS --> CACHE
+    end
+
+    subgraph "Experiment (5 minutes)"
+        CACHE -->|make_dataloader| BATCHES["Batches [B, T]"]
+        BATCHES -->|forward| GPT["GPT Model"]
+        GPT -->|loss| BACKWARD[Backward Pass]
+        BACKWARD -->|gradients| OPT[AdamW]
+        OPT -->|update| GPT
+        GPT -.->|metrics| WB[WandB]
+    end
+
+    subgraph "Evaluation"
+        GPT -->|eval mode| EVAL[evaluate_bpb]
+        EVAL -->|val_bpb| DECISION{Improved?}
+        DECISION -->|keep| COMMIT["Git Commit"]
+        DECISION -->|discard| RESET["Git Reset"]
+    end
+
+    subgraph "Logging"
+        COMMIT --> TSV[results.tsv]
+        RESET --> TSV
+        TSV --> RPT["reports/*.md"]
+    end
+```
+
+## Design Choices
+
+- **Single file to modify.** The agent only touches `train.py`. Diffs stay reviewable and experiments stay comparable.
+- **Fixed time budget.** Training always runs for exactly 5 minutes. This makes experiments comparable regardless of what the agent changes and finds the optimal model for your specific GPU.
+- **Self-contained.** No heavy frameworks. One GPU, one file, one metric.
+- **Adapter pattern.** Platform-specific setup lives in `adapters/`, keeping the core code clean.
 
 ## License
 

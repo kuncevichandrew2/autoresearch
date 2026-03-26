@@ -21,3 +21,7 @@ dev/
 
 # Results file
 results.tsv
+
+# Environment files with secrets
+.env
+adapters/**/.env
